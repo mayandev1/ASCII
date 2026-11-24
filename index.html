@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Margaridas para Margarida</title>
+<meta name="description" content="Um buquê de margaridas feito de código.">
+<meta property="og:title" content="Margaridas pra você ♡">
+<meta property="og:description" content="Um buquê de margaridas feito de código.">
+<meta name="theme-color" content="#050505">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #050505; overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: pointer; }
+  .msg {
+    position: fixed; left: 0; right: 0; top: max(5vh, env(safe-area-inset-top));
+    padding: 0 16px; text-align: center; pointer-events: none;
+    color: #f3ead8; font-family: 'Instrument Serif', Georgia, serif;
+    font-size: clamp(30px, 7vw, 64px); line-height: 1.02; letter-spacing: -0.01em;
+    text-shadow: 0 0 22px rgba(255, 220, 140, .18);
+    opacity: 0; transform: translateY(6px); transition: opacity 2.2s ease, transform 2.2s ease;
+  }
+  .msg i { color: #ffd54a; }
+  .msg small {
+    display: block; margin-top: .7em; color: #8d877c;
+    font: 500 11px/1.4 ui-monospace, Menlo, Consolas, monospace; letter-spacing: .22em;
+  }
+  .msg.on { opacity: 1; transform: none; }
+  .hint {
+    position: fixed; left: 0; right: 0; bottom: max(14px, env(safe-area-inset-bottom));
+    text-align: center; pointer-events: none; color: #4d4943;
+    font: 11px ui-monospace, Menlo, Consolas, monospace; letter-spacing: .18em;
+    opacity: 0; transition: opacity 2s ease;
+  }
+  .hint.on { opacity: 1; }
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Buquê de margaridas animado em ASCII"></canvas>
+<div class="msg" id="msg"></div>
+<div class="hint" id="hint">toque para replantar</div>
+
+<script>
+(() => {
+  // ---------- mensagem (personalizável via ?para=Nome&msg=...&sub=...) ----------
+  const q = new URLSearchParams(location.search);
+  const esc = s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const msgEl = document.getElementById('msg'), hintEl = document.getElementById('hint');
+  const para = q.get('para'), msg = q.get('msg'), sub = q.get('sub');
+  msgEl.innerHTML =
+    (msg ? esc(msg) : `Margaridas pra <i>${para ? esc(para) : 'você'}</i>`) +
+    `<small>${esc(sub || 'feitas de código, com carinho ♡')}</small>`;
+
+  // ---------- setup ----------
+  // WebGL faz a etapa ASCII inteira na GPU (1 draw call por frame); 2D fica de reserva
+  let cv = document.getElementById('c'), gl = null, ctx = null;
+  const off = document.createElement('canvas');
+  const oc = off.getContext('2d', { willReadFrequently: true });
+  const RAMP = " .'`^\",:;Il!i><~+_-?][}{1)(|/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
+  const STAR = ['.', '·', '*', '+', "'", '-', '|'];
+
+  let vw, vh, dpr, cw, ch, cols, rows, aspect, W, Hw, U, cx, baseY, tieY;
+  let noise, stars, flowers, leaves, t0, tRibbon, tDone, bb;
+  let hiCycle = -1, hiCell = [0, 0];
+  const atlas = document.createElement('canvas'), actx = atlas.getContext('2d');
+  const glyph = document.createElement('canvas'), gctx = glyph.getContext('2d');
+  const colorCv = document.createElement('canvas'), cctx = colorCv.getContext('2d');
+  let gw, gh, X, Y;
+
+  const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+  const easeOut = x => 1 - Math.pow(1 - clamp(x), 3);
+  const easeBack = x => { x = clamp(x); const c = 1.4; return 1 + (c + 1) * Math.pow(x - 1, 3) + c * Math.pow(x - 1, 2); };
+  function mulberry(seed) {
+    return () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  }
+
+  // x, altura acima do laço, tamanho  (unidades U)
+  const SPEC = [
+    // fundo / topo
+    [-6, 92, .6], [15, 90, .55], [-52, 64, .55], [54, 66, .55],
+    [0, 78, .95], [-19, 72, .9], [20, 74, .9],
+    [-35, 62, .88], [-10, 60, 1.0], [11, 62, .98], [36, 63, .86],
+    [-47, 47, .8], [-24, 48, .95], [0, 46, 1.02], [24, 48, .94], [48, 47, .8],
+    [-36, 32, .88], [-12, 31, .98], [12, 30, .98], [36, 32, .86],
+    // frente
+    [-23, 16, .86], [0, 14, .92], [23, 16, .84],
+  ];
+  const BUDS = [[-30, 92, .4], [36, 90, .38], [-58, 74, .34], [60, 76, .34], [3, 102, .34], [-62, 52, .3], [63, 54, .3]];
+
+  function build() {
+    const rnd = mulberry(20261123);
+    const portrait = W < Hw * .9, xs = portrait ? .8 : 1, ys = portrait ? 1.22 : 1;
+    U = Math.min(W / (132 * xs), Hw * .76 / (20 + 106 * ys));
+    cx = W / 2;
+    const Sh = (20 + 106 * ys) * U, topReserve = Hw * 0.2;
+    baseY = Math.min(Hw * .95, (topReserve + Hw) / 2 + Sh / 2);
+    tieY = baseY - 20 * U;
+    bb = { x0: cx - 68 * U * xs, x1: cx + 68 * U * xs, y0: (tieY - 112 * U * ys) * aspect, y1: baseY * aspect + 2 };
+
+    const all = [...SPEC.map(s => [...s, false]), ...BUDS.map(s => [...s, true])];
+    const order = all.map((_, i) => i).sort(() => rnd() - .5);
+    flowers = all.map(([x, y, s, bud], i) => {
+      const n = 14 + Math.floor(rnd() * 4);
+      const petals = [];
+      for (let k = 0; k < n; k++) petals.push({
+        a: k / n * Math.PI * 2 + (rnd() - .5) * .12,
+        L: .86 + rnd() * .2, w: .85 + rnd() * .3, back: k % 2 === 0,
+      });
+      const start = .25 + order.indexOf(i) * .085;
+      return {
+        bud, hx: x * U * xs, hy: -y * U * ys, r: s * 12.5 * U,
+        bx: -x * U * .1 + (rnd() - .5) * 2.4 * U, tx: (rnd() - .5) * 2.6 * U,
+        bend: (rnd() - .5) * .28 + (x > 0 ? .05 : -.05),
+        rot: rnd() * Math.PI, sy: .72 + rnd() * .28, ph: rnd() * 6.28,
+        petals, start, stemEnd: start + 2.0, bloomStart: start + 2.2, bloomEnd: start + 3.9,
+      };
+    });
+    tRibbon = Math.max(...flowers.map(f => f.stemEnd)) + .1;
+    tDone = Math.max(...flowers.filter(f => !f.bud).map(f => f.bloomEnd));
+
+    leaves = [];
+    for (let k = 0; k < 18; k++) {
+      const fi = Math.floor(rnd() * SPEC.length), f = flowers[fi];
+      leaves.push({
+        f, at: .22 + rnd() * .34, side: (f.hx >= 0 ? 1 : -1) * (rnd() < .78 ? 1 : -1),
+        tilt: .45 + rnd() * .5, len: (8 + rnd() * 6) * U, wid: (1.3 + rnd() * .7) * U,
+      });
+    }
+  }
+
+  function resize() {
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    vw = innerWidth; vh = innerHeight;
+    cv.width = Math.round(vw * dpr); cv.height = Math.round(vh * dpr);
+    ch = clamp(Math.min(vh / 150, vw / 80), 4.5, 10);
+    actx.font = `700 ${ch}px ui-monospace, Menlo, Consolas, monospace`;
+    cw = Math.max(ch * .5, actx.measureText('M').width);
+    cols = Math.ceil(vw / cw); rows = Math.ceil(vh / ch);
+    aspect = cw / ch;
+    off.width = cols; off.height = rows;
+    W = cols; Hw = rows / aspect;
+    noise = new Float32Array(cols * rows);
+    for (let i = 0; i < noise.length; i++) noise[i] = Math.random();
+    stars = [];
+    for (let i = 0; i < cols * rows; i++) if (Math.random() < .016) {
+      const big = Math.random() < .18;
+      stars.push({
+        i, ci: big ? 2 + Math.floor(Math.random() * 2) : [0, 1, 4][Math.floor(Math.random() * 3)],
+        b: big ? 1 : .7, ph: Math.random() * 6.28, s: .6 + Math.random() * 1.8,
+      });
+    }
+
+    // atlas de glifos: cada caractere é desenhado uma vez só e depois copiado com drawImage
+    gw = Math.ceil(cw * dpr); gh = Math.ceil(ch * dpr);
+    atlas.width = gw * RAMP.length; atlas.height = gh * 2;
+    actx.font = `700 ${ch * dpr}px ui-monospace, Menlo, Consolas, monospace`;
+    actx.textBaseline = 'top';
+    actx.fillStyle = '#fff';
+    for (let i = 0; i < RAMP.length; i++) actx.fillText(RAMP[i], i * gw, 0);
+    actx.fillStyle = '#ddd4ff';
+    STAR.forEach((c, i) => actx.fillText(c, i * gw, gh));
+    glyph.width = cv.width; glyph.height = cv.height;
+    colorCv.width = cols; colorCv.height = rows;
+    X = new Int32Array(cols); Y = new Int32Array(rows);
+    for (let x = 0; x < cols; x++) X[x] = Math.round(x * cw * dpr);
+    for (let y = 0; y < rows; y++) Y[y] = Math.round(y * ch * dpr);
+    if (gl) glResize();
+    build();
+  }
+
+  // ---------- WebGL ----------
+  let glU = {}, texScene, texAtlas;
+  function glInit() {
+    const vs = 'attribute vec2 p; void main(){ gl_Position = vec4(p, 0., 1.); }';
+    const fs = `precision highp float;
+      uniform sampler2D uScene, uAtlas;
+      uniform vec2 uRes, uCell, uGrid, uGlyph, uAtlasSize;
+      uniform float uLast, uTime, uFade, uStarA, uHiA;
+      uniform vec2 uHi;
+      float h(vec2 c, float s) { return fract(sin(dot(c, vec2(12.9898, 78.233)) + s) * 43758.5453); }
+      float glyph(float idx, float row, vec2 l) {
+        return texture2D(uAtlas, (vec2(idx, row) * uGlyph + l * uCell) / uAtlasSize).a;
+      }
+      void main() {
+        vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
+        vec2 cell = floor(p / uCell);
+        vec2 l = (p - cell * uCell) / uCell;
+        vec3 bg = vec3(5. / 255.);
+        vec4 s = texture2D(uScene, (cell + .5) / uGrid);
+        float lum = dot(s.rgb, vec3(.3, .59, .11)) * s.a;
+        vec3 col = bg;
+        if (s.a > 14. / 255. && lum > .04) {
+          float idx = max(2., floor(clamp(lum * 1.08 + (h(cell, 0.) - .5) * .22, 0., 1.) * uLast + .5));
+          vec3 c = s.rgb * (.7 + .3 * s.a);
+          col = mix(bg + c * .14 * uFade, c, clamp(glyph(idx, 0., l) * 1.25, 0., 1.) * uFade);
+        } else if (h(cell, 1.7) < .016) {
+          float big = step(h(cell, 3.1), .18), k = h(cell, 5.3);
+          float ci = big > .5 ? 2. + floor(h(cell, 4.2) * 2.) : (k < .34 ? 0. : (k < .67 ? 1. : 4.));
+          float a = (.22 + .6 * (.5 + .5 * sin(uTime * (.6 + h(cell, 6.4) * 1.8) + h(cell, 7.5) * 6.28)))
+                    * mix(.7, 1., big) * uStarA;
+          col = mix(bg, vec3(221., 212., 255.) / 255., a * glyph(ci, 1., l));
+        }
+        // estrela em destaque: halo suave + '*' no centro + raios '-' e '|'
+        if (uHiA > 0. && !(s.a > 14. / 255. && lum > .04)) {
+          vec2 dc = cell - uHi;
+          vec2 dp = (p - (uHi + .5) * uCell) / uCell.y;
+          float a = uHiA * (.88 + .12 * sin(uTime * 11.));
+          float d2 = dot(dp, dp);
+          col += vec3(.75, .68, 1.) * exp(-d2 / 40.) * .45 * a;      // halo largo
+          col += vec3(1., .95, .88) * exp(-d2 / 2.5) * .7 * a;       // núcleo
+          float g = 0.;
+          if (dc.x == 0. && dc.y == 0.) g = glyph(2., 1., l);
+          else if (dc.y == 0. && abs(dc.x) <= 7.) g = glyph(5., 1., l) * pow(1. - abs(dc.x) / 8., 1.4);
+          else if (dc.x == 0. && abs(dc.y) <= 4.) g = glyph(6., 1., l) * pow(1. - abs(dc.y) / 5., 1.4);
+          else if (abs(dc.x) == 1. && abs(dc.y) == 1.) g = glyph(1., 1., l) * .8;
+          col = mix(col, vec3(1., .97, .92), clamp(g * a * 1.4, 0., 1.));
+        }
+        gl_FragColor = vec4(col, 1.);
+      }`;
+    const sh = (type, src) => {
+      const o = gl.createShader(type); gl.shaderSource(o, src); gl.compileShader(o);
+      if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o));
+      return o;
+    };
+    const prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(prog); gl.useProgram(prog);
+    for (const n of ['uScene', 'uAtlas', 'uRes', 'uCell', 'uGrid', 'uGlyph', 'uAtlasSize', 'uLast', 'uTime', 'uFade', 'uStarA', 'uHi', 'uHiA'])
+      glU[n] = gl.getUniformLocation(prog, n);
+    gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    const loc = gl.getAttribLocation(prog, 'p');
+    gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    const mk = (unit, filter) => {
+      const t = gl.createTexture(); gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+      return t;
+    };
+    texScene = mk(0, gl.NEAREST); texAtlas = mk(1, gl.LINEAR);
+    gl.uniform1i(glU.uScene, 0); gl.uniform1i(glU.uAtlas, 1);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  }
+  function glResize() {
+    gl.viewport(0, 0, cv.width, cv.height);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, texAtlas);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, atlas);
+    gl.uniform2f(glU.uRes, cv.width, cv.height);
+    gl.uniform2f(glU.uCell, cw * dpr, ch * dpr);
+    gl.uniform2f(glU.uGrid, cols, rows);
+    gl.uniform2f(glU.uGlyph, gw, gh);
+    gl.uniform2f(glU.uAtlasSize, atlas.width, atlas.height);
+    gl.uniform1f(glU.uLast, RAMP.length - 1);
+  }
+  function renderGL(t, fade, hiA) {
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texScene);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, off);
+    gl.uniform1f(glU.uTime, t);
+    gl.uniform1f(glU.uFade, fade);
+    gl.uniform1f(glU.uStarA, .3 + .7 * clamp(t / 1.5));
+    gl.uniform2f(glU.uHi, hiCell[0], hiCell[1]);
+    gl.uniform1f(glU.uHiA, hiA);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  // ---------- geometria ----------
+  function stemPts(f, sw) {
+    const B = { x: cx + f.bx, y: baseY }, T = { x: cx + f.tx, y: tieY };
+    const H = { x: cx + f.hx + sw, y: tieY + f.hy };
+    const dx = H.x - T.x, dy = H.y - T.y, len = Math.hypot(dx, dy);
+    const C = { x: (T.x + H.x) / 2 - dy / len * f.bend * len, y: (T.y + H.y) / 2 + dx / len * f.bend * len };
+    const pts = [];
+    for (let i = 0; i < 8; i++) { const u = i / 8; pts.push({ x: B.x + (T.x - B.x) * u, y: B.y + (T.y - B.y) * u }); }
+    for (let i = 0; i <= 30; i++) {
+      const u = i / 30, a = (1 - u) * (1 - u), b = 2 * u * (1 - u), c = u * u;
+      pts.push({ x: a * T.x + b * C.x + c * H.x, y: a * T.y + b * C.y + c * H.y });
+    }
+    return pts;
+  }
+  function partial(pts, g) {
+    const n = (pts.length - 1) * clamp(g), k = Math.floor(n), fr = n - k;
+    const out = pts.slice(0, k + 1);
+    if (k < pts.length - 1) {
+      const a = pts[k], b = pts[k + 1];
+      out.push({ x: a.x + (b.x - a.x) * fr, y: a.y + (b.y - a.y) * fr });
+    }
+    return out;
+  }
+  function strokePath(p, w, col) {
+    if (p.length < 2) return;
+    oc.beginPath(); oc.moveTo(p[0].x, p[0].y);
+    for (let i = 1; i < p.length; i++) oc.lineTo(p[i].x, p[i].y);
+    oc.lineWidth = w; oc.strokeStyle = col; oc.lineCap = 'round'; oc.lineJoin = 'round'; oc.stroke();
+  }
+
+  function drawLeaf(P, ang, L, wd) {
+    oc.save(); oc.translate(P.x, P.y); oc.rotate(ang);
+    const g = oc.createLinearGradient(0, 0, L, 0);
+    g.addColorStop(0, '#2f6e2a'); g.addColorStop(.5, '#4f9e3e'); g.addColorStop(1, '#7cc35a');
+    oc.beginPath(); oc.moveTo(0, 0);
+    oc.quadraticCurveTo(L * .45, -wd * 1.2, L, -wd * .15);
+    oc.quadraticCurveTo(L * .5, wd * .9, 0, 0);
+    oc.fillStyle = g; oc.fill();
+    oc.beginPath(); oc.moveTo(0, 0); oc.quadraticCurveTo(L * .5, -wd * .15, L * .95, -wd * .15);
+    oc.lineWidth = Math.max(.35, U * .18); oc.strokeStyle = 'rgba(170,230,130,.55)'; oc.stroke();
+    oc.restore();
+  }
+
+  function drawBud(P, ang, f, s) {
+    if (s <= 0) return;
+    oc.save(); oc.translate(P.x, P.y); oc.rotate(ang);
+    const r = f.r * (f.bud ? .55 : .3) * s;
+    const g = oc.createLinearGradient(-r, 0, r * 1.4, 0);
+    g.addColorStop(0, '#2f6e2a'); g.addColorStop(.7, '#6fb64e'); g.addColorStop(1, f.bud ? '#d9e8c4' : '#eef0dc');
+    oc.beginPath(); oc.ellipse(r * .45, 0, r, r * .62, 0, 0, Math.PI * 2);
+    oc.fillStyle = g; oc.fill();
+    oc.restore();
+  }
+
+  function drawFlower(P, f, bloom) {
+    const e = easeBack(bloom), spin = (1 - easeOut(bloom)) * 1.3;
+    oc.save(); oc.translate(P.x, P.y); oc.rotate(f.rot); oc.scale(1, f.sy);
+    for (const pass of [true, false]) {
+      for (const p of f.petals) {
+        if (p.back !== pass) continue;
+        const L = f.r * p.L * e * (pass ? 1.02 : .97), wd = f.r * .15 * p.w * (.4 + .6 * e);
+        if (L <= .1) continue;
+        oc.save(); oc.rotate(p.a + spin);
+        const g = oc.createLinearGradient(0, 0, L, 0);
+        if (pass) { g.addColorStop(0, '#b3aa90'); g.addColorStop(.4, '#e4ddcc'); g.addColorStop(1, '#d6cfd6'); }
+        else { g.addColorStop(0, '#d8cca8'); g.addColorStop(.35, '#faf6ec'); g.addColorStop(.85, '#ffffff'); g.addColorStop(1, '#ece6ee'); }
+        oc.beginPath(); oc.ellipse(L * .56, 0, L * .47, wd, 0, 0, Math.PI * 2);
+        oc.fillStyle = g; oc.fill();
+        oc.lineWidth = Math.max(.4, U * .2); oc.strokeStyle = 'rgba(30,27,24,.85)'; oc.stroke();
+        oc.restore();
+      }
+    }
+    const cr = f.r * .27 * easeOut(bloom * 1.5);
+    if (cr > .1) {
+      const g = oc.createRadialGradient(-cr * .25, -cr * .25, 0, 0, 0, cr);
+      g.addColorStop(0, '#fff3a6'); g.addColorStop(.45, '#ffc928'); g.addColorStop(.82, '#e39a12'); g.addColorStop(1, '#8f5206');
+      oc.beginPath(); oc.arc(0, 0, cr, 0, Math.PI * 2); oc.fillStyle = g; oc.fill();
+      oc.fillStyle = 'rgba(150,85,5,.75)';
+      for (let k = 0; k < 34; k++) {
+        const rr = cr * .9 * Math.sqrt(k / 34), a = k * 2.39996;
+        oc.beginPath(); oc.arc(Math.cos(a) * rr, Math.sin(a) * rr, cr * .06, 0, Math.PI * 2); oc.fill();
+      }
+    }
+    oc.restore();
+  }
+
+  function drawRibbon(s) {
+    if (s <= 0) return;
+    oc.save(); oc.translate(cx, tieY); oc.scale(s, s);
+    const u = U, dark = '#9e2d57', mid = '#e45d8c', lite = '#f6a3c0';
+    oc.lineWidth = Math.max(.35, u * .2); oc.strokeStyle = dark;
+    // fitas caindo
+    for (const d of [-1, 1]) {
+      oc.beginPath(); oc.moveTo(d * .8 * u, 0);
+      oc.quadraticCurveTo(d * 5 * u, 6 * u, d * 4 * u, 13 * u);
+      oc.lineTo(d * 6.4 * u, 12.2 * u);
+      oc.quadraticCurveTo(d * 7 * u, 6 * u, d * 2 * u, 0);
+      oc.closePath(); oc.fillStyle = mid; oc.fill(); oc.stroke();
+    }
+    // faixa
+    oc.beginPath(); oc.rect(-5 * u, -1.6 * u, 10 * u, 3.2 * u); oc.fillStyle = mid; oc.fill(); oc.stroke();
+    // laços
+    for (const d of [-1, 1]) {
+      oc.save(); oc.translate(d * 4.3 * u, -1.2 * u); oc.rotate(d * -.38);
+      const g = oc.createLinearGradient(0, -3 * u, 0, 3 * u);
+      g.addColorStop(0, lite); g.addColorStop(1, mid);
+      oc.beginPath(); oc.ellipse(0, 0, 5 * u, 2.7 * u, 0, 0, Math.PI * 2); oc.fillStyle = g; oc.fill(); oc.stroke();
+      oc.beginPath(); oc.ellipse(-d * .8 * u, 0, 2.4 * u, 1 * u, 0, 0, Math.PI * 2); oc.fillStyle = dark; oc.fill();
+      oc.restore();
+    }
+    oc.beginPath(); oc.arc(0, -1 * u, 1.8 * u, 0, Math.PI * 2); oc.fillStyle = lite; oc.fill(); oc.stroke();
+    oc.restore();
+  }
+
+  function drawScene(t, dt) {
+    const sway = U * .8 * easeOut(t / 3);
+    const heads = [];
+    // caules + folhas
+    for (const f of flowers) {
+      const g = easeOut((t - f.start) / (f.stemEnd - f.start));
+      if (g <= 0) continue;
+      const pts = stemPts(f, Math.sin(t * .9 + f.ph) * sway);
+      const p = partial(pts, g);
+      const w = Math.max(1.05, .72 * U) * (f.bud ? .8 : 1);
+      strokePath(p, w, '#3f8a34');
+      strokePath(p.map(q => ({ x: q.x - w * .22, y: q.y })), w * .35, 'rgba(140,205,100,.8)');
+      f._pts = pts; f._g = g;
+      const a = p[p.length - 1], b = p[Math.max(0, p.length - 3)];
+      heads.push({ f, P: a, ang: Math.atan2(a.y - b.y, a.x - b.x) });
+    }
+    for (const l of leaves) {
+      const f = l.f; if (!f._g) continue;
+      const s = clamp((f._g - l.at) / .3); if (s <= 0) continue;
+      const i = Math.floor(l.at * (f._pts.length - 1)), a = f._pts[i], b = f._pts[i + 1];
+      const tan = Math.atan2(b.y - a.y, b.x - a.x);
+      drawLeaf(a, tan + l.side * l.tilt, l.len * easeOut(s), l.wid * easeOut(s));
+    }
+    drawRibbon(easeBack((t - tRibbon) / .9));
+    // cabeças: de trás (mais altas) pra frente
+    heads.sort((A, B) => A.f.hy - B.f.hy);
+    for (const { f, P, ang } of heads) {
+      if (f._g < 1) continue;
+      const budS = easeOut((t - f.stemEnd) / .5);
+      const bloom = f.bud ? 0 : clamp((t - f.bloomStart) / (f.bloomEnd - f.bloomStart));
+      if (bloom < .35) drawBud(P, ang, f, budS * (1 - bloom / .35 * (f.bud ? 0 : 1)));
+      if (bloom > 0) drawFlower(P, f, bloom);
+    }
+  }
+
+  // ---------- loop ----------
+  // sem trava de fps: roda na taxa da tela (60/120/144 Hz)
+  let lastT = 0, fadeStart = null, fpsAvg = 60, lastNow = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    if (!cols || !rows) return;
+    if (lastNow) fpsAvg += (1000 / Math.max(1, now - lastNow) - fpsAvg) * .05;
+    lastNow = now; window.__fps = Math.round(fpsAvg);
+
+    // replantar: some suave em 0,45s e recomeça
+    let fade = 1;
+    if (fadeStart !== null) {
+      const p = (now - fadeStart) / 450;
+      if (p >= 1) { fadeStart = null; restart(now); } else fade = 1 - easeOut(p);
+    }
+    const t = (now - t0) / 1000, dt = clamp(t - lastT, 0, .1); lastT = t;
+
+    oc.setTransform(1, 0, 0, 1, 0, 0); oc.clearRect(0, 0, cols, rows);
+    oc.setTransform(1, 0, 0, aspect, 0, 0);
+    drawScene(t, dt);
+    const cyc = now / 4000, ci = Math.floor(cyc), hp = (cyc - ci) * 4;
+    if (ci !== hiCycle) { hiCycle = ci; hiCell = pickStar(); }
+    const hiA = hp < .5 ? easeOut(hp / .5) : 1 - easeOut((hp - .5) / 2.3);
+    if (gl) renderGL(t, fade, hiA); else render2D(t, fade, hiA);
+
+    msgEl.classList.toggle('on', fadeStart === null && t > tDone - .6);
+    hintEl.classList.toggle('on', fadeStart === null && t > tDone + 3);
+  }
+
+  // célula aleatória longe do buquê e do título
+  function pickStar() {
+    for (let k = 0; k < 120; k++) {
+      const x = 10 + Math.floor(Math.random() * (cols - 20)), y = 6 + Math.floor(Math.random() * (rows - 12));
+      if (x > bb.x0 - 8 && x < bb.x1 + 8 && y > bb.y0 - 5 && y < bb.y1 + 5) continue;
+      if (y < rows * .2 && Math.abs(x - cols / 2) < cols * .4) continue;
+      return [x, y];
+    }
+    return [10, Math.floor(rows * .5)];
+  }
+
+  // reserva sem WebGL: glifos via drawImage do atlas
+  function render2D(t, fade, hiA) {
+    const img = oc.getImageData(0, 0, cols, rows), d = img.data;
+
+    // 1) glifos brancos na camada "glyph"
+    gctx.globalCompositeOperation = 'source-over';
+    gctx.clearRect(0, 0, glyph.width, glyph.height);
+    const last = RAMP.length - 1;
+    for (let y = 0, i = 0; y < rows; y++) {
+      const gy = Y[y];
+      for (let x = 0; x < cols; x++, i++) {
+        const j = i * 4, al = d[j + 3];
+        if (al < 14) { d[j + 3] = 0; continue; }
+        const k = al / 255;
+        const lum = (.3 * d[j] + .59 * d[j + 1] + .11 * d[j + 2]) / 255 * k;
+        if (lum < .04) { d[j + 3] = 0; continue; }
+        let idx = Math.round(clamp(lum * 1.08 + (noise[i] - .5) * .22) * last);
+        if (idx < 2) idx = 2;
+        gctx.drawImage(atlas, idx * gw, 0, gw, gh, X[x], gy, gw, gh);
+        d[j + 3] = (.6 + .4 * k) * 255;
+      }
+    }
+    // 2) pinta os glifos com a cor de cada célula (uma única operação)
+    cctx.putImageData(img, 0, 0);
+    gctx.globalCompositeOperation = 'source-in';
+    gctx.imageSmoothingEnabled = false;
+    gctx.drawImage(colorCv, 0, 0, cols * cw * dpr, rows * ch * dpr);
+
+    // 3) compõe na tela: fundo, estrelas, brilho de fundo das células, glifos
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1; ctx.fillStyle = '#050505'; ctx.fillRect(0, 0, cv.width, cv.height);
+    const starA = .3 + .7 * clamp(t / 1.5);
+    for (const s of stars) {
+      if (d[s.i * 4 + 3]) continue;
+      ctx.globalAlpha = (.22 + .6 * (.5 + .5 * Math.sin(t * s.s + s.ph))) * s.b * starA;
+      ctx.drawImage(atlas, s.ci * gw, gh, gw, gh, X[s.i % cols], Y[(s.i / cols) | 0], gw, gh);
+    }
+    ctx.imageSmoothingEnabled = false;
+    ctx.globalAlpha = .14 * fade;
+    ctx.drawImage(colorCv, 0, 0, cols * cw * dpr, rows * ch * dpr);
+    ctx.globalAlpha = fade;
+    ctx.drawImage(glyph, 0, 0);
+    if (hiA > 0) {
+      const [hx, hy] = hiCell, a = hiA * (.88 + .12 * Math.sin(t * 11));
+      const px = (hx + .5) * cw * dpr, py = (hy + .5) * ch * dpr, R = ch * dpr * 11;
+      const g = ctx.createRadialGradient(px, py, 0, px, py, R);
+      g.addColorStop(0, 'rgba(255,245,230,.85)'); g.addColorStop(.12, 'rgba(210,195,255,.4)');
+      g.addColorStop(.5, 'rgba(190,175,255,.12)'); g.addColorStop(1, 'rgba(190,175,255,0)');
+      ctx.globalAlpha = a; ctx.fillStyle = g; ctx.fillRect(px - R, py - R, 2 * R, 2 * R);
+      const put = (ci, x, y, al) => { if (x < 0 || y < 0 || x >= cols || y >= rows) return;
+        ctx.globalAlpha = a * al; ctx.drawImage(atlas, ci * gw, gh, gw, gh, X[x], Y[y], gw, gh); };
+      put(2, hx, hy, 1);
+      for (let d = 1; d <= 7; d++) { const f = Math.pow(1 - d / 8, 1.4); put(5, hx - d, hy, f); put(5, hx + d, hy, f); }
+      for (let d = 1; d <= 4; d++) { const f = Math.pow(1 - d / 5, 1.4); put(6, hx, hy - d, f); put(6, hx, hy + d, f); }
+      for (const [ox, oy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) put(1, hx + ox, hy + oy, .8);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function restart(now = performance.now()) { t0 = now; lastT = 0; }
+  addEventListener('pointerdown', () => { if (fadeStart === null) fadeStart = performance.now(); });
+  if (!q.has('2d')) {
+    gl = cv.getContext('webgl', { alpha: false, antialias: false, depth: false, stencil: false, powerPreference: 'high-performance' });
+    if (gl) {
+      try { glInit(); } catch (e) {
+        console.warn('WebGL falhou, usando 2D:', e);
+        const n = cv.cloneNode(); cv.replaceWith(n); cv = n; gl = null;
+      }
+    }
+  }
+  if (!gl) ctx = cv.getContext('2d');
+  document.documentElement.dataset.renderer = gl ? 'webgl' : '2d';
+
+  addEventListener('resize', resize);
+  resize(); restart(performance.now() - (+q.get('t') || 0) * 1000); // ?t=segundos (só pra teste)
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+services:
+  margaridas:
+    build: .
+    container_name: margaridas
+    ports:
+      - "8085:80"
+    restart: unless-stopped
+
+  # Link público temporário (https://xxxx.trycloudflare.com) pra mandar pra ela.
+  # Sobe com: docker compose --profile share up -d
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: margaridas-tunnel
+    command: tunnel --no-autoupdate --url http://margaridas:80
+    depends_on:
+      - margaridas
+    restart: unless-stopped
+    profiles: ["share"]
