@@ -35,12 +35,30 @@
     opacity: 0; transition: opacity 2s ease;
   }
   .hint.on { opacity: 1; }
+  .fs {
+    position: fixed; z-index: 2;
+    right: max(14px, env(safe-area-inset-right)); bottom: max(12px, env(safe-area-inset-bottom));
+    width: 40px; height: 40px; padding: 0; display: grid; place-items: center;
+    border-radius: 10px; border: 1px solid rgba(255, 255, 255, .14);
+    background: rgba(255, 255, 255, .05); color: #cfc7b8; cursor: pointer;
+    opacity: .6; transition: opacity .3s ease, background .3s ease;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .fs:hover, .fs:focus-visible { opacity: 1; background: rgba(255, 255, 255, .1); }
+  .fs:focus-visible { outline: 2px solid #ffd54a; outline-offset: 2px; }
+  .fs svg { width: 20px; height: 20px; }
+  .fs .exit, .fs.on .enter { display: none; }
+  .fs.on .exit { display: block; }
 </style>
 </head>
 <body>
 <canvas id="c" aria-label="Buquê de margaridas animado em ASCII"></canvas>
 <div class="msg" id="msg"></div>
 <div class="hint" id="hint">toque para replantar</div>
+<button class="fs" id="fs" type="button" aria-label="Tela cheia" title="Tela cheia (F)">
+  <svg class="enter" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+  <svg class="exit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg>
+</button>
 
 <script>
 (() => {
@@ -388,6 +406,7 @@
     // caules + folhas
     for (const f of flowers) {
       const g = easeOut((t - f.start) / (f.stemEnd - f.start));
+      f._g = g;
       if (g <= 0) continue;
       const pts = stemPts(f, Math.sin(t * .9 + f.ph) * sway);
       const p = partial(pts, g);
@@ -516,7 +535,10 @@
     ctx.globalAlpha = 1;
   }
 
-  function restart(now = performance.now()) { t0 = now; lastT = 0; }
+  function restart(now = performance.now()) {
+    t0 = now; lastT = 0;
+    if (flowers) for (const f of flowers) f._g = 0;
+  }
   addEventListener('pointerdown', () => { if (fadeStart === null) fadeStart = performance.now(); });
   if (!q.has('2d')) {
     gl = cv.getContext('webgl', { alpha: false, antialias: false, depth: false, stencil: false, powerPreference: 'high-performance' });
@@ -529,6 +551,28 @@
   }
   if (!gl) ctx = cv.getContext('2d');
   document.documentElement.dataset.renderer = gl ? 'webgl' : '2d';
+
+  // ---------- tela cheia ----------
+  const fsBtn = document.getElementById('fs'), root = document.documentElement;
+  const fsReq = root.requestFullscreen || root.webkitRequestFullscreen;
+  const fsExit = document.exitFullscreen || document.webkitExitFullscreen;
+  const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
+  if (!fsReq) fsBtn.hidden = true;           // ex.: iPhone não deixa páginas entrarem em tela cheia
+  function toggleFs() {
+    const r = fsEl() ? fsExit.call(document) : fsReq.call(root, { navigationUI: 'hide' });
+    if (r && r.catch) r.catch(() => {});
+  }
+  function syncFs() {
+    const on = !!fsEl();
+    fsBtn.classList.toggle('on', on);
+    fsBtn.setAttribute('aria-label', on ? 'Sair da tela cheia' : 'Tela cheia');
+    fsBtn.title = on ? 'Sair da tela cheia (F)' : 'Tela cheia (F)';
+  }
+  fsBtn.addEventListener('pointerdown', e => e.stopPropagation()); // não replanta
+  fsBtn.addEventListener('click', e => { e.stopPropagation(); toggleFs(); });
+  addEventListener('keydown', e => { if ((e.key === 'f' || e.key === 'F') && fsReq && !e.repeat) toggleFs(); });
+  document.addEventListener('fullscreenchange', syncFs);
+  document.addEventListener('webkitfullscreenchange', syncFs);
 
   addEventListener('resize', resize);
   resize(); restart(performance.now() - (+q.get('t') || 0) * 1000); // ?t=segundos (só pra teste)
